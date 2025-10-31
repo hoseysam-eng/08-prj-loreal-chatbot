@@ -45,7 +45,7 @@ function hideTyping() {
 
 // Set initial message
 chatWindow.textContent =
-  "👋 Hello! I’m your L’Oréal product advisor. How can I help you today?";
+  "👋 Greetings! I’m your L’Oréal product advisor. How can I help you today?";
 
 /* Helper: fetch with retries for rate-limited worker responses (429)
    Simple exponential backoff and honor Retry-After header when provided. */
