@@ -5,7 +5,7 @@ const chatWindow = document.getElementById("chatWindow");
 
 // For students: paste your deployed Cloudflare Worker URL below.
 // Example: const WORKER_URL = "https://your-worker-name.your-subdomain.workers.dev";
-const WORKER_URL = ""; // leave blank to use local secrets.js during development
+const WORKER_URL = "https://gentle-cherry.james-hosey3.workers.dev/"; // leave blank to use local secrets.js during development
 
 // System prompt: keeps the AI focused on L’Oréal topics and politely declines unrelated questions.
 const systemPrompt = `
@@ -47,6 +47,34 @@ function hideTyping() {
 chatWindow.textContent =
   "👋 Hello! I’m your L’Oréal product advisor. How can I help you today?";
 
+/* Helper: fetch with retries for rate-limited worker responses (429)
+   Simple exponential backoff and honor Retry-After header when provided. */
+async function fetchWithRetries(url, options, maxRetries = 3) {
+  // Track the number of attempts made
+  let attempt = 0;
+  while (true) {
+    const res = await fetch(url, options);
+    const text = await res.text();
+
+    // If rate limited and we still have retries left, wait and retry
+    if (res.status === 429 && attempt < maxRetries) {
+      attempt += 1;
+      const retryAfter = res.headers.get("Retry-After");
+      // If Retry-After is provided (seconds), use it; otherwise use exponential backoff
+      const delayMs = retryAfter
+        ? parseInt(retryAfter, 10) * 1000
+        : 1000 * Math.pow(2, attempt); // 1s, 2s, 4s...
+
+      // Small student-friendly comment: wait before retrying
+      await new Promise((r) => setTimeout(r, delayMs));
+      continue;
+    }
+
+    // Return response and raw text so caller can parse safely
+    return { res, text, attempts: attempt };
+  }
+}
+
 /* Handle form submit */
 chatForm.addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -71,14 +99,39 @@ chatForm.addEventListener("submit", async (e) => {
 
     if (WORKER_URL) {
       // Preferred: call your Cloudflare Worker (no API key in the browser)
-      const res = await fetch(WORKER_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages }),
-      });
-      data = await res.json();
-      if (!res.ok)
-        throw new Error(data?.error?.message || "Worker request failed");
+      const { res, text, attempts } = await fetchWithRetries(
+        WORKER_URL,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ messages }),
+        },
+        3 // max retries
+      );
+
+      // Try to parse JSON safely
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch (parseErr) {
+        data = { parseError: parseErr.message, rawText: text };
+      }
+
+      // If still not OK, build a clearer error message (special-case 429)
+      if (!res.ok) {
+        const retryAfter = res.headers.get("Retry-After");
+        const baseMsg =
+          data?.error?.message ||
+          data?.message ||
+          data?.rawText ||
+          `Worker request failed (status ${res.status})`;
+        const extra =
+          res.status === 429
+            ? ` Rate limited by worker. Attempts: ${attempts}.${
+                retryAfter ? ` Retry-After: ${retryAfter}s.` : ""
+              }`
+            : "";
+        throw new Error(baseMsg + extra);
+      }
     } else {
       // Local dev only: call OpenAI directly using secrets.js -> window.OPENAI_API_KEY
       const apiKey =
@@ -101,9 +154,23 @@ chatForm.addEventListener("submit", async (e) => {
           temperature: 0.6,
         }),
       });
-      data = await res.json();
-      if (!res.ok)
-        throw new Error(data?.error?.message || "OpenAI request failed");
+
+      // Read text first and try to parse JSON safely
+      const text = await res.text();
+      try {
+        data = text ? JSON.parse(text) : {};
+      } catch (parseErr) {
+        data = { parseError: parseErr.message, rawText: text };
+      }
+
+      if (!res.ok) {
+        const errMsg =
+          data?.error?.message ||
+          data?.message ||
+          data?.rawText ||
+          `OpenAI request failed (status ${res.status})`;
+        throw new Error(errMsg);
+      }
     }
 
     // Read the assistant message per Chat Completions API
